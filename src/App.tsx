@@ -94,6 +94,7 @@ export default function App() {
   const [editingCueText, setEditingCueText] = useState('');
 
   const [isPlayerReady, setIsPlayerReady] = useState(false);
+  const [embedDomain, setEmbedDomain] = useState<'www.youtube-nocookie.com' | 'www.youtube.com'>('www.youtube-nocookie.com');
   const playerRef = useRef<any>(null);
   const lastSpokenCueIdRef = useRef<string | null>(null);
 
@@ -167,151 +168,144 @@ export default function App() {
     });
   };
 
-  // Continuous YouTube Player Initialization (mounts smoothly without black screen)
+  // Direct HTML5 postMessage command dispatcher to control YouTube iframe reliably without external API dependencies
+  const sendIframeCommand = (func: string, args: any[] = []) => {
+    // 1. YouTube IFrame API if available
+    if (playerRef.current && typeof playerRef.current[func] === 'function') {
+      try {
+        playerRef.current[func](...args);
+      } catch (e) {}
+    }
+    // 2. Direct HTML5 postMessage to embedded iframe
+    const iframe = document.getElementById('youtube-dubbed-player-iframe') as HTMLIFrameElement;
+    if (iframe && iframe.contentWindow) {
+      try {
+        iframe.contentWindow.postMessage(
+          JSON.stringify({
+            event: 'command',
+            func: func,
+            args: args,
+          }),
+          '*'
+        );
+      } catch (e) {}
+    }
+  };
+
+  // Listen to postMessage events from YouTube iframe (playback time, state changes)
+  useEffect(() => {
+    const handleMessage = (e: MessageEvent) => {
+      try {
+        const data = typeof e.data === 'string' ? JSON.parse(e.data) : e.data;
+        if (data && data.event === 'infoDelivery' && data.info) {
+          if (typeof data.info.currentTime === 'number' && !isNaN(data.info.currentTime)) {
+            setPlaybackTime(Math.floor(data.info.currentTime));
+          }
+          if (typeof data.info.duration === 'number' && data.info.duration > 0) {
+            syncVideoDuration(Math.round(data.info.duration));
+          }
+          if (typeof data.info.playerState === 'number') {
+            // 1: PLAYING, 2: PAUSED, 0: ENDED
+            if (data.info.playerState === 1) {
+              setIsPlayingDubbed(true);
+            } else if (data.info.playerState === 2 || data.info.playerState === 0) {
+              setIsPlayingDubbed(false);
+              if ('speechSynthesis' in window) {
+                window.speechSynthesis.cancel();
+              }
+            }
+          }
+        }
+      } catch (err) {}
+    };
+
+    window.addEventListener('message', handleMessage);
+    return () => window.removeEventListener('message', handleMessage);
+  }, []);
+
+  // Internal timeline ticker to keep cues synchronized even if postMessage is sandboxed
+  useEffect(() => {
+    let ticker: any = null;
+    if (isPlayingDubbed) {
+      ticker = setInterval(() => {
+        setPlaybackTime((prev) => {
+          const maxDur = videoInfo?.durationSec || 600;
+          if (prev >= maxDur) {
+            setIsPlayingDubbed(false);
+            if ('speechSynthesis' in window) {
+              window.speechSynthesis.cancel();
+            }
+            return prev;
+          }
+          return prev + 1;
+        });
+      }, 1000);
+    }
+    return () => {
+      if (ticker) clearInterval(ticker);
+    };
+  }, [isPlayingDubbed, videoInfo?.durationSec]);
+
+  // Non-blocking YouTube Player API connector (runs silently in the background)
   useEffect(() => {
     if (activeTab !== 'translate' || !videoInfo?.videoId) return;
 
-    let destroyed = false;
-    setIsPlayerReady(false);
-    setIsPlayingDubbed(false);
+    setIsPlayerReady(true);
 
-    const setupYTPlayer = () => {
-      if (destroyed) return;
+    const tryInitApi = () => {
       if (!window.YT || !window.YT.Player) return;
-
-      // 1. If player already exists and is healthy, just cue the new video!
-      if (playerRef.current && typeof playerRef.current.cueVideoById === 'function') {
-        try {
-          playerRef.current.cueVideoById(videoInfo.videoId);
-          setIsPlayerReady(true);
-          return;
-        } catch (e) {
-          console.warn('cueVideoById failed, will recreate player:', e);
-        }
-      }
-
-      // 2. Ensure container element exists inside the slot
-      const slot = document.getElementById('youtube-player-slot');
-      let playerContainer = document.getElementById('youtube-dubbed-player');
-
-      if (!playerContainer && slot) {
-        slot.innerHTML = '<div id="youtube-dubbed-player" class="w-full h-full"></div>';
-        playerContainer = document.getElementById('youtube-dubbed-player');
-      }
-
-      if (!playerContainer) return;
-
-      if (playerRef.current) {
-        try {
-          playerRef.current.destroy();
-        } catch (e) {}
-        playerRef.current = null;
-        if (slot) {
-          slot.innerHTML = '<div id="youtube-dubbed-player" class="w-full h-full"></div>';
-        }
-      }
-
       try {
-        playerRef.current = new window.YT.Player('youtube-dubbed-player', {
-          videoId: videoInfo.videoId,
-          playerVars: {
-            autoplay: 0,
-            playsinline: 1,
-            rel: 0,
-            modestbranding: 1,
-            enablejsapi: 1,
-            origin: window.location.origin,
-          },
-          events: {
-            onReady: (event: any) => {
-              if (!destroyed) {
-                setIsPlayerReady(true);
+        const iframeElem = document.getElementById('youtube-dubbed-player-iframe');
+        if (iframeElem && !playerRef.current) {
+          playerRef.current = new window.YT.Player('youtube-dubbed-player-iframe', {
+            events: {
+              onReady: (event: any) => {
                 try {
-                  event.target.setVolume(100);
                   const dur = event.target.getDuration();
-                  if (typeof dur === 'number' && dur > 0) {
-                    syncVideoDuration(Math.round(dur));
-                  }
+                  if (typeof dur === 'number' && dur > 0) syncVideoDuration(Math.round(dur));
                 } catch (e) {}
-              }
-            },
-            onStateChange: (event: any) => {
-              if (destroyed) return;
-              try {
-                const dur = event.target.getDuration();
-                if (typeof dur === 'number' && dur > 0) {
-                  syncVideoDuration(Math.round(dur));
+              },
+              onStateChange: (event: any) => {
+                if (event.data === 1) {
+                  setIsPlayingDubbed(true);
+                } else if (event.data === 2 || event.data === 0) {
+                  setIsPlayingDubbed(false);
+                  if ('speechSynthesis' in window) window.speechSynthesis.cancel();
                 }
-              } catch (e) {}
-              // 1 = PLAYING, 2 = PAUSED, 0 = ENDED
-              if (event.data === 1) {
-                setIsPlayingDubbed(true);
-              } else if (event.data === 2 || event.data === 0) {
-                setIsPlayingDubbed(false);
-                if ('speechSynthesis' in window) {
-                  window.speechSynthesis.cancel();
-                }
-              }
+              },
             },
-            onError: (event: any) => {
-              console.warn('YouTube Player error event:', event.data);
-              setIsPlayerReady(true);
-            },
-          },
-        });
-      } catch (err) {
-        console.warn('Error instantiating YouTube player:', err);
-      }
+          });
+        }
+      } catch (e) {}
     };
 
     if (window.YT && window.YT.Player) {
-      setupYTPlayer();
+      tryInitApi();
     } else {
-      if (!document.querySelector('script[src*="youtube.com/iframe_api"]')) {
+      if (!document.querySelector('script[src*="iframe_api"]')) {
         const tag = document.createElement('script');
         tag.src = 'https://www.youtube.com/iframe_api';
+        tag.async = true;
+        tag.onerror = () => {
+          console.warn('iframe_api script unreachable; using native HTML5 postMessage bridge.');
+        };
         document.body.appendChild(tag);
       }
-      const checkInterval = setInterval(() => {
+      const check = setInterval(() => {
         if (window.YT && window.YT.Player) {
-          clearInterval(checkInterval);
-          setupYTPlayer();
+          clearInterval(check);
+          tryInitApi();
         }
-      }, 100);
-      setTimeout(() => clearInterval(checkInterval), 6000);
+      }, 200);
+      setTimeout(() => clearInterval(check), 4000);
     }
 
     return () => {
-      destroyed = true;
       if ('speechSynthesis' in window) {
         window.speechSynthesis.cancel();
       }
     };
-  }, [videoInfo?.videoId, activeTab]);
-
-  // High-precision seamless polling of video currentTime and duration
-  useEffect(() => {
-    const timeSyncInterval = setInterval(() => {
-      if (playerRef.current) {
-        try {
-          if (typeof playerRef.current.getCurrentTime === 'function') {
-            const currentTime = playerRef.current.getCurrentTime();
-            if (typeof currentTime === 'number' && !isNaN(currentTime)) {
-              setPlaybackTime(Math.floor(currentTime));
-            }
-          }
-          if (typeof playerRef.current.getDuration === 'function') {
-            const realDuration = playerRef.current.getDuration();
-            if (typeof realDuration === 'number' && realDuration > 0) {
-              syncVideoDuration(Math.round(realDuration));
-            }
-          }
-        } catch (e) {}
-      }
-    }, 250);
-
-    return () => clearInterval(timeSyncInterval);
-  }, []);
+  }, [videoInfo?.videoId, activeTab, embedDomain]);
 
   // Track active cue and trigger smooth voiceover dubbing in parallel
   useEffect(() => {
@@ -356,16 +350,12 @@ export default function App() {
       utterance.volume = dubbingVolume / 100;
 
       // Smooth Ducking: lower YouTube video volume while Russian dubbing speaks
-      if (playerRef.current && typeof playerRef.current.setVolume === 'function') {
-        playerRef.current.setVolume(originalDuckingVolume);
-      }
+      sendIframeCommand('setVolume', [originalDuckingVolume]);
       setIsSpeakingVoiceover(true);
 
       const restoreOriginalVolume = () => {
         setIsSpeakingVoiceover(false);
-        if (playerRef.current && typeof playerRef.current.setVolume === 'function') {
-          playerRef.current.setVolume(100);
-        }
+        sendIframeCommand('setVolume', [100]);
       };
 
       utterance.onend = restoreOriginalVolume;
@@ -410,19 +400,18 @@ export default function App() {
   };
 
   const togglePlayPause = () => {
-    if (!playerRef.current) return;
     try {
       if (isPlayingDubbed) {
-        playerRef.current.pauseVideo();
+        sendIframeCommand('pauseVideo');
+        setIsPlayingDubbed(false);
         if ('speechSynthesis' in window) {
           window.speechSynthesis.cancel();
           setIsSpeakingVoiceover(false);
-          if (typeof playerRef.current.setVolume === 'function') {
-            playerRef.current.setVolume(100);
-          }
         }
+        sendIframeCommand('setVolume', [100]);
       } else {
-        playerRef.current.playVideo();
+        sendIframeCommand('playVideo');
+        setIsPlayingDubbed(true);
       }
     } catch (e) {
       setIsPlayingDubbed(!isPlayingDubbed);
@@ -436,14 +425,8 @@ export default function App() {
       window.speechSynthesis.cancel();
       setIsSpeakingVoiceover(false);
     }
-    if (playerRef.current && typeof playerRef.current.seekTo === 'function') {
-      try {
-        playerRef.current.seekTo(newSec, true);
-        if (typeof playerRef.current.setVolume === 'function') {
-          playerRef.current.setVolume(100);
-        }
-      } catch (e) {}
-    }
+    sendIframeCommand('seekTo', [newSec, true]);
+    sendIframeCommand('setVolume', [100]);
   };
 
   const jumpToCue = (cue: TranscriptCue) => {
@@ -451,14 +434,11 @@ export default function App() {
       window.speechSynthesis.cancel();
       setIsSpeakingVoiceover(false);
     }
-    if (playerRef.current && typeof playerRef.current.seekTo === 'function') {
-      try {
-        playerRef.current.seekTo(cue.start, true);
-        playerRef.current.playVideo();
-      } catch (e) {}
-    }
     setPlaybackTime(cue.start);
     lastSpokenCueIdRef.current = cue.id;
+    sendIframeCommand('seekTo', [cue.start, true]);
+    sendIframeCommand('playVideo');
+    setIsPlayingDubbed(true);
     if (enableVoiceover) {
       speakCue(cue.translatedText, cue.end - cue.start);
     }
@@ -1211,13 +1191,25 @@ export default function App() {
                 <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-2xl relative">
                   {/* Video Viewport: Seamless persistent YouTube player */}
                   <div className="relative aspect-video bg-black flex items-center justify-center overflow-hidden group">
-                    <div id="youtube-player-slot" className="w-full h-full">
-                      <div id="youtube-dubbed-player" className="w-full h-full" />
+                    <div id="youtube-player-slot" className="w-full h-full relative">
+                      <iframe
+                        key={`${embedDomain}-${videoInfo.videoId}`}
+                        id="youtube-dubbed-player-iframe"
+                        src={`https://${embedDomain}/embed/${videoInfo.videoId}?enablejsapi=1&autoplay=0&rel=0&playsinline=1`}
+                        className="w-full h-full border-0"
+                        title={videoInfo.title}
+                        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                        allowFullScreen
+                        onLoad={() => {
+                          setIsPlayerReady(true);
+                          sendIframeCommand('listening');
+                        }}
+                      />
                     </div>
 
                     {/* Yandex Browser Floating AI Translator Header inside Video Player */}
                     <div className="absolute top-3 inset-x-3 z-30 flex items-start justify-between pointer-events-auto">
-                      {/* Left Badge: Signature Yandex Translator pill */}
+                      {/* Left Badge: Signature Yandex Translator pill & Mirror Domain Switcher */}
                       <div className="flex items-center gap-2">
                         <button
                           onClick={() => {
@@ -1226,9 +1218,7 @@ export default function App() {
                             if (!next && 'speechSynthesis' in window) {
                               window.speechSynthesis.cancel();
                               setIsSpeakingVoiceover(false);
-                              if (playerRef.current && typeof playerRef.current.setVolume === 'function') {
-                                playerRef.current.setVolume(100);
-                              }
+                              sendIframeCommand('setVolume', [100]);
                             }
                           }}
                           className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-semibold shadow-xl backdrop-blur-md border transition-all ${
@@ -1243,11 +1233,30 @@ export default function App() {
                             <span>{enableVoiceover ? 'Переведено нейросетями' : 'Перевести видео'}</span>
                           </span>
                         </button>
+
+                        {/* Quick Mirror Toggle for Russian ISPs / DNS blocks */}
+                        <button
+                          onClick={() => setEmbedDomain(prev => prev === 'www.youtube-nocookie.com' ? 'www.youtube.com' : 'www.youtube-nocookie.com')}
+                          className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-950/90 hover:bg-slate-800 text-[11px] text-slate-300 hover:text-white border border-slate-700/80 transition-all shadow-xl"
+                          title="Сменить зеркало YouTube (NoCookie / Стандарт) при замедлениях или блокировках провайдера"
+                        >
+                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                          <span>{embedDomain === 'www.youtube-nocookie.com' ? 'Зеркало NoCookie' : 'YouTube Стандарт'}</span>
+                        </button>
                       </div>
 
                       {/* Right Controls: Quick voice, soundwave, and Settings Dropdown Toggle */}
                       <div className="relative flex items-center gap-2">
                         <div className="flex items-center gap-2 bg-slate-950/90 backdrop-blur-md border border-slate-700/80 px-2.5 py-1.5 rounded-full text-xs shadow-xl">
+                          <a
+                            href={videoInfo.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-slate-400 hover:text-white p-0.5 rounded transition-colors"
+                            title="Открыть оригинал на YouTube"
+                          >
+                            <ExternalLink className="w-3.5 h-3.5" />
+                          </a>
                           {/* Animated Soundwave when voiceover is speaking */}
                           {isSpeakingVoiceover && (
                             <div className="flex items-center gap-1 px-1 text-purple-400" title="Голос дубляжа активен">
