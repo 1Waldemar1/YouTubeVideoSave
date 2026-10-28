@@ -1,0 +1,35 @@
+{
+  "name": "youtube-video-save",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx server.ts",
+    "build": "tsc && vite build",
+    "preview": "vite preview --port 3000 --host 0.0.0.0",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@google/genai": "^2.31.0",
+    "canvas-confetti": "^1.9.4",
+    "express": "^4.21.2",
+    "lucide-react": "^1.16.0",
+    "qrcode": "^1.5.4",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.0.9",
+    "@types/canvas-confetti": "^1.9.0",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.13.5",
+    "@types/qrcode": "^1.5.5",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "@vitejs/plugin-react": "^4.3.4",
+    "tailwindcss": "^4.0.9",
+    "tsx": "^4.19.3",
+    "typescript": "^5.7.3",
+    "vite": "^6.2.0"
+  }
+}

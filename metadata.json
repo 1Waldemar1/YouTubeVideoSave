@@ -1,0 +1,8 @@
+{
+  "name": "YouTubeVideoSave",
+  "description": "Fast and versatile YouTube video and audio saver with high quality formats, thumbnail downloader, clip trimmer, and media library.",
+  "permissions": [],
+  "capabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
